@@ -1,0 +1,98 @@
+
+var punto = ee.Geometry.Point([-110.9706, 29.0814]); // ERNO Hermosillo
+var fecha_inicio = '2020-01-01';
+var fecha_fin = '2025-03-31';
+
+var cams = ee.ImageCollection('ECMWF/CAMS/NRT')
+  .filterDate(fecha_inicio, fecha_fin)
+  .select('particulate_matter_d_less_than_25_um_surface')
+  .map(function(img) {
+    // Convertir de kg/m³ a µg/m³ (multiplicar por 10^9)
+    return img.multiply(1e9).rename('PM25')
+      .copyProperties(img, ['system:time_start']);
+  });
+
+
+var startDate = ee.Date(fecha_inicio);
+var endDate = ee.Date(fecha_fin);
+var nMonths = ee.Number(endDate.difference(startDate, 'month')).round().add(1);
+
+
+var monthDates = ee.List.sequence(0, nMonths.subtract(1))
+  .map(function(monthOffset) {
+    var date = startDate.advance(monthOffset, 'month');
+    var yearMonth = date.format('YYYY-MM');
+    return ee.Feature(null, {
+      'fecha': yearMonth,
+      'year': date.get('year'),
+      'month': date.get('month')
+    });
+  });
+
+
+var monthlyData = ee.FeatureCollection(monthDates).map(function(feature) {
+  // Extraer año y mes
+  var year = feature.get('year');
+  var month = feature.get('month');
+  
+
+  var startMonth = ee.Date.fromYMD(year, month, 1);
+  var endMonth = startMonth.advance(1, 'month');
+  
+
+  var monthlyImages = cams.filterDate(startMonth, endMonth);
+  
+  
+  var hasImages = monthlyImages.size().gt(0);
+  
+ 
+  var pm25Value = ee.Algorithms.If(
+    hasImages,
+    monthlyImages.mean().reduceRegion({
+      reducer: ee.Reducer.mean(),
+      geometry: punto,
+      scale: 11132,
+      bestEffort: true
+    }).get('PM25'),
+    null
+  );
+  
+
+  return feature.set({
+    'PM25': pm25Value,
+    'num_imagenes': monthlyImages.size()
+  });
+});
+
+
+Export.table.toDrive({
+  collection: monthlyData,
+  description: 'PM25_CAMS_ERNO_2020_2023_Completo',
+  fileFormat: 'CSV',
+  selectors: ['fecha', 'year', 'month', 'PM25', 'num_imagenes']
+});
+
+
+for (var year = 2016; year <= 2025; year++) {
+  var yearData = monthlyData.filter(ee.Filter.eq('year', year));
+  Export.table.toDrive({
+    collection: yearData,
+    description: 'PM25_CAMS_ERNO_' + year,
+    fileFormat: 'CSV',
+    selectors: ['fecha', 'year', 'month', 'PM25', 'num_imagenes']
+  });
+}
+
+
+Map.centerObject(punto, 10);
+Map.addLayer(punto, {color: 'red'}, 'Estación ERNO');
+
+
+var muestra = cams.filterDate('2020-06-01', '2020-06-15').mean();
+Map.addLayer(muestra, 
+  {min: 0, max: 50, palette: ['blue', 'cyan', 'green', 'yellow', 'red']}, 
+  'Muestra PM2.5 Junio 2020', false);
+
+
+print('Número total de imágenes disponibles:', cams.size());
+print('Primer mes de datos:', monthlyData.first());
